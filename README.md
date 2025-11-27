@@ -13,6 +13,7 @@ Small, single-file utility for giving a set of GitHub repositories the same base
 - Python 3.8+ (standard library only; no extra deps).
 - `git` on PATH.
 - Push access to the target repos (e.g., via GitHub credential manager or PAT).
+- Optional: `GITHUB_TOKEN` environment variable if you want exporting to include private repos or avoid low anonymous rate limits.
 
 ## Quick start
 1) Create a file listing repos (one per line) in any of these forms:
@@ -21,6 +22,12 @@ owner/repo
 https://github.com/owner/repo.git
 git@github.com:owner/repo.git
 ```
+
+Or generate the list automatically from a GitHub profile/org URL:
+```
+python go.py --export-repos-from-url https://github.com/JohnDoe6345789 --export-output-file repos.txt
+```
+Edit `repos.txt` if you want to remove anything before running the main command.
 
 2) Run the tool (base directory defaults to `./repos`):
 ```
@@ -31,10 +38,13 @@ Useful flags:
 - Preview only: `--dry-run`
 - Custom base directory: `--base-dir /path/to/workdir`
 - Add stats file: `--write-stats-file`
+- Export repo list from a GitHub account: `--export-repos-from-url https://github.com/owner`
 
 ## CLI flags
-- `--repos-file PATH` (required): Text file of repo specs, one per line.
-- `--name STRING` (required): Name used in the MIT license header.
+- `--repos-file PATH`: Text file of repo specs, one per line. Required when processing repos; optional when only exporting.
+- `--export-repos-from-url URL`: GitHub profile/org URL (or account name) to write all repos into a file.
+- `--export-output-file PATH`: Destination for the exported repo list (defaults to `repos.txt` or `--repos-file` if provided).
+- `--name STRING`: Name used in the MIT license header. Required when processing repos.
 - `--year STRING` (default: current year): Copyright year for the license.
 - `--base-dir DIR` (default: `repos`): Where repos are cloned/updated locally.
 - `--commit-message STRING` (default provided): Message for the auto-commit.

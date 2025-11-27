@@ -16,11 +16,15 @@ Requirements:
 
 import argparse
 import datetime
+import json
 import os
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 MIT_LICENSE_TEMPLATE = """MIT License
@@ -269,6 +273,113 @@ EXTENSION_LANGUAGE_MAP: Dict[str, str] = {
     ".kt": "kotlin",
     ".kts": "kotlin",
 }
+
+
+def parse_github_account(url_or_name: str) -> str:
+    """Extract the GitHub account name from a URL or raw string."""
+    cleaned = url_or_name.strip()
+    if not cleaned:
+        raise ValueError("GitHub URL or account name is required")
+
+    parsed = urllib.parse.urlparse(cleaned)
+    if parsed.scheme or parsed.netloc:
+        if "github.com" not in parsed.netloc.lower():
+            raise ValueError("Provide a GitHub profile or organization URL")
+        parts = [part for part in parsed.path.split("/") if part]
+        if not parts:
+            raise ValueError("GitHub URL is missing the account name")
+        return parts[0]
+
+    if "/" in cleaned:
+        raise ValueError("Provide a GitHub account name or profile URL, not a repo URL")
+
+    return cleaned
+
+
+def parse_next_link(link_header: str) -> str:
+    """Return the next page URL from a GitHub Link header, if present."""
+    if not link_header:
+        return ""
+
+    for part in link_header.split(","):
+        section = part.strip()
+        if 'rel="next"' not in section:
+            continue
+        if not section.startswith("<"):
+            continue
+        url_part = section.split(";")[0].strip()
+        if url_part.startswith("<") and url_part.endswith(">"):
+            return url_part[1:-1]
+
+    return ""
+
+
+def fetch_github_repositories(
+    account: str,
+    token: Optional[str] = None,
+) -> List[str]:
+    """
+    Fetch all repositories for the given GitHub account (user or org).
+
+    Returns a list of full repo names in the form owner/name.
+    """
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "github-repair-script",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    repos: List[str] = []
+    next_url: Optional[str] = (
+        f"https://api.github.com/users/{account}/repos"
+        "?per_page=100&type=owner&sort=full_name"
+    )
+
+    while next_url:
+        req = urllib.request.Request(next_url, headers=headers)
+        try:
+            with urllib.request.urlopen(req) as resp:
+                charset = resp.headers.get_content_charset() or "utf-8"
+                payload = json.loads(resp.read().decode(charset))
+                if not isinstance(payload, list):
+                    raise ValueError("Unexpected GitHub API response format")
+                for repo in payload:
+                    full_name = repo.get("full_name")
+                    if full_name:
+                        repos.append(full_name)
+                next_url = parse_next_link(resp.headers.get("Link", ""))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise ValueError(f"GitHub account '{account}' not found") from exc
+            raise RuntimeError(f"GitHub API returned HTTP {exc.code}") from exc
+
+    return repos
+
+
+def write_repo_list(path: str, repos: List[str]) -> None:
+    """Write repository specs (owner/name) to a text file, one per line."""
+    directory = os.path.dirname(os.path.abspath(path))
+    if directory and not os.path.exists(directory):
+        os.makedirs(directory, exist_ok=True)
+
+    unique_repos = sorted(dict.fromkeys(repos))
+    with open(path, "w", encoding="utf-8") as f:
+        for repo in unique_repos:
+            f.write(f"{repo}\n")
+
+
+def export_repos_from_url(
+    url_or_name: str,
+    output_path: str,
+    token: Optional[str],
+) -> List[str]:
+    """Export all repos for a GitHub account to a file and return the list."""
+    account = parse_github_account(url_or_name)
+    repos = fetch_github_repositories(account, token)
+    write_repo_list(output_path, repos)
+    print(f"[+] Exported {len(repos)} repos for '{account}' to {output_path}")
+    return repos
 
 
 class RepoStats:
@@ -686,8 +797,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--repos-file",
-        required=True,
         help="Path to text file listing repos (one per line).",
+    )
+    parser.add_argument(
+        "--export-repos-from-url",
+        help=(
+            "GitHub profile/org URL (or account name) to export all repos "
+            "to a text file."
+        ),
+    )
+    parser.add_argument(
+        "--export-output-file",
+        help=(
+            "Destination path for exported repo list "
+            "(default: repos.txt or --repos-file if set)."
+        ),
     )
     parser.add_argument(
         "--base-dir",
@@ -696,7 +820,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--name",
-        required=True,
         help="Author / copyright holder name for the MIT license.",
     )
     parser.add_argument(
@@ -727,7 +850,52 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """Entry point."""
     args = parse_args()
-    repos = read_repo_list(args.repos_file)
+
+    if args.export_output_file and not args.export_repos_from_url:
+        print(
+            "[!] --export-output-file is ignored without --export-repos-from-url",
+            file=sys.stderr,
+        )
+
+    if args.export_repos_from_url:
+        output_path = args.export_output_file or args.repos_file or "repos.txt"
+        token = os.getenv("GITHUB_TOKEN")
+        try:
+            export_repos_from_url(
+                url_or_name=args.export_repos_from_url,
+                output_path=output_path,
+                token=token,
+            )
+        except Exception as exc:
+            print(f"[!] Failed to export repo list: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+        if not args.repos_file:
+            args.repos_file = output_path
+
+        if not args.name:
+            print(
+                "Repo list exported. Provide --name to process repositories, "
+                "or edit the list and rerun.",
+            )
+            return
+
+    if not args.repos_file:
+        print(
+            "You must supply --repos-file or --export-repos-from-url to create one.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not args.name:
+        print("--name is required when processing repositories.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        repos = read_repo_list(args.repos_file)
+    except FileNotFoundError:
+        print(f"[!] Repo list not found: {args.repos_file}", file=sys.stderr)
+        sys.exit(1)
 
     for repo_spec in repos:
         try:
